@@ -12,6 +12,7 @@ import html
 import json
 import os
 import sqlite3
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ HTML_PATH = os.path.join(os.path.dirname(__file__), "index.html")
 TM_API = "https://app.ticketmaster.com/discovery/v2/events.json"
 SG_API = "https://api.seatgeek.com/2/events"
 
-DIAG = {"raw": 0, "kept": 0, "sg_matched": 0}
+DIAG = {"raw": 0, "kept": 0, "sg_matched": 0, "sg_fetched": 0, "sg_note": ""}
 
 
 # ---- SeatGeek prices (matched to games by date) -----------------------------
@@ -47,31 +48,44 @@ def fetch_seatgeek_prices():
                                 stats.get("highest_price"))
 
     if mock:
-        with open(mock) as f:
-            absorb(json.load(f))
+        absorb(json.load(open(mock)))
+        DIAG["sg_fetched"] = len(prices)
         return prices
 
     cid = os.environ.get("SEATGEEK_CLIENT_ID")
     if not cid:
+        DIAG["sg_note"] = "no client id set"
         return prices
-    page = 1
-    while page <= 10:
-        q = {"client_id": cid, "performers.slug": SG_SLUG,
-             "per_page": "100", "page": str(page)}
-        url = SG_API + "?" + urllib.parse.urlencode(q)
-        try:
-            with urllib.request.urlopen(url, timeout=30) as r:
-                data = json.load(r)
-        except Exception as e:
-            print(f"SeatGeek fetch failed (page {page}): {e}")
-            break
-        events = data.get("events", [])
-        absorb(events)
-        meta = data.get("meta", {})
-        per = meta.get("per_page") or 100
-        if not events or page * per >= (meta.get("total") or 0):
-            break
-        page += 1
+
+    fetched = [0]
+
+    def query(extra):
+        page = 1
+        while page <= 10:
+            q = {"client_id": cid, "per_page": "100", "page": str(page), **extra}
+            url = SG_API + "?" + urllib.parse.urlencode(q)
+            try:
+                with urllib.request.urlopen(url, timeout=30) as r:
+                    data = json.load(r)
+            except urllib.error.HTTPError as e:
+                DIAG["sg_note"] = f"HTTP {e.code}"
+                return
+            except Exception as e:
+                DIAG["sg_note"] = f"error: {e}"
+                return
+            events = data.get("events", [])
+            fetched[0] += len(events)
+            absorb(events)
+            meta = data.get("meta", {})
+            per = meta.get("per_page") or 100
+            if not events or page * per >= (meta.get("total") or 0):
+                break
+            page += 1
+
+    query({"performers.slug": SG_SLUG})
+    if fetched[0] == 0 and not DIAG["sg_note"]:
+        query({"q": "Charlotte Hornets"})       # fallback if the slug is wrong
+    DIAG["sg_fetched"] = fetched[0]
     return prices
 
 
@@ -247,6 +261,9 @@ def build_dashboard(db):
     sub = (f"Lowest SeatGeek price per game. Green = at its lowest ever. "
            f"Prices matched for {DIAG['sg_matched']} of {DIAG['kept']} games. "
            f"Updated {updated}.")
+    if DIAG["sg_matched"] == 0:
+        sub += (f" [SeatGeek debug: fetched {DIAG['sg_fetched']} events"
+                + (f", {DIAG['sg_note']}" if DIAG['sg_note'] else "") + ".]")
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hornets Ticket Tracker</title><style>
