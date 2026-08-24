@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Charlotte Hornets home-game price tracker.
 
-Every run it:
-  1. pulls Hornets games from the Ticketmaster API
-  2. keeps HOME games (played in Charlotte) and records each game's lowest
-     price into a small SQLite database (this builds the price history)
-  3. flags onsales and unusually good prices, and pushes a notification
-  4. rebuilds index.html - a sortable table you can view on GitHub Pages
+Schedule + onsale info comes from Ticketmaster (reliable, all 42 home games).
+Prices come from SeatGeek (Ticketmaster's free API doesn't expose them), matched
+to each game by date. Every run records the lowest price into a SQLite history,
+flags onsales and good deals, and rebuilds a sortable dashboard (index.html).
 
 Standard library only. No pip installs.
 """
@@ -19,39 +17,66 @@ import urllib.request
 from datetime import datetime, timezone
 
 # ---- settings you can tweak -------------------------------------------------
-ATTRACTION_ID = "931493"           # Charlotte Hornets on Ticketmaster
-HOME_CITY     = "charlotte"        # home games are played here
-DEAL_RATIO    = 0.80               # alert when lowest <= 80% of its own average
-MIN_HISTORY   = 3                  # need this many past points before deal alerts
-DB_PATH       = os.path.join(os.path.dirname(__file__), "prices.db")
-HTML_PATH     = os.path.join(os.path.dirname(__file__), "index.html")
-TM_API        = "https://app.ticketmaster.com/discovery/v2/events.json"
+HOME_CITY   = "charlotte"     # home games are played here
+SG_SLUG     = "charlotte-hornets"
+DEAL_RATIO  = 0.80            # alert when lowest <= 80% of its own average
+MIN_HISTORY = 3              # need this many past points before deal alerts
+DB_PATH   = os.path.join(os.path.dirname(__file__), "prices.db")
+HTML_PATH = os.path.join(os.path.dirname(__file__), "index.html")
+TM_API = "https://app.ticketmaster.com/discovery/v2/events.json"
+SG_API = "https://api.seatgeek.com/2/events"
 
-# filled in during a run so the dashboard can show what the API returned
-DIAG = {"raw": 0, "kept": 0, "sample_venue": ""}
-
-
-def event_price(event_id, key):
-    """Ticketmaster's search results usually omit priceRanges; the single-event
-    endpoint includes them. Returns (lowest, highest) or (None, None)."""
-    url = ("https://app.ticketmaster.com/discovery/v2/events/"
-           + urllib.parse.quote(event_id) + ".json?"
-           + urllib.parse.urlencode({"apikey": key}))
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            ev = json.load(r)
-    except Exception as e:
-        print(f"price lookup failed for {event_id}: {e}")
-        return None, None
-    prices = ev.get("priceRanges", [])
-    low = min((p["min"] for p in prices if p.get("min") is not None), default=None)
-    high = max((p["max"] for p in prices if p.get("max") is not None), default=None)
-    return low, high
+DIAG = {"raw": 0, "kept": 0, "sg_matched": 0}
 
 
-# ---- fetch ------------------------------------------------------------------
+# ---- SeatGeek prices (matched to games by date) -----------------------------
+def fetch_seatgeek_prices():
+    """Return {YYYY-MM-DD: (lowest, highest)} for Hornets HOME games."""
+    mock = os.environ.get("MOCK_SG")
+    prices = {}
+
+    def absorb(events):
+        for ev in events:
+            city = ((ev.get("venue") or {}).get("city") or "")
+            if HOME_CITY not in city.lower():      # home games only
+                continue
+            date = (ev.get("datetime_local") or "")[:10]
+            stats = ev.get("stats") or {}
+            if date:
+                prices[date] = (stats.get("lowest_price"),
+                                stats.get("highest_price"))
+
+    if mock:
+        with open(mock) as f:
+            absorb(json.load(f))
+        return prices
+
+    cid = os.environ.get("SEATGEEK_CLIENT_ID")
+    if not cid:
+        return prices
+    page = 1
+    while page <= 10:
+        q = {"client_id": cid, "performers.slug": SG_SLUG,
+             "per_page": "100", "page": str(page)}
+        url = SG_API + "?" + urllib.parse.urlencode(q)
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = json.load(r)
+        except Exception as e:
+            print(f"SeatGeek fetch failed (page {page}): {e}")
+            break
+        events = data.get("events", [])
+        absorb(events)
+        meta = data.get("meta", {})
+        per = meta.get("per_page") or 100
+        if not events or page * per >= (meta.get("total") or 0):
+            break
+        page += 1
+    return prices
+
+
+# ---- Ticketmaster schedule --------------------------------------------------
 def is_home_game(ev):
-    """True if this event is a Hornets HOME game (played in Charlotte)."""
     venues = ev.get("_embedded", {}).get("venues", [])
     if not venues:
         return False
@@ -62,12 +87,11 @@ def is_home_game(ev):
 
 
 def fetch_home_games():
-    """Return a list of normalized home-game dicts from Ticketmaster.
+    """Home games from Ticketmaster, priced from SeatGeek.
 
-    Set MOCK_EVENTS=/path/to.json to test offline without an API key.
+    Test offline with MOCK_EVENTS (TM events) and MOCK_SG (SeatGeek events).
     """
     mock = os.environ.get("MOCK_EVENTS")
-    key = None
     if mock:
         with open(mock) as f:
             raw = json.load(f)
@@ -77,7 +101,7 @@ def fetch_home_games():
             raise RuntimeError("TM_API_KEY not set")
         raw = []
         page = 0
-        while page < 10:                       # safety cap; season fits easily
+        while page < 10:
             q = {"apikey": key, "keyword": "Charlotte Hornets",
                  "classificationName": "Sports", "countryCode": "US",
                  "size": "100", "sort": "date,asc", "page": str(page)}
@@ -92,25 +116,20 @@ def fetch_home_games():
                 break
 
     DIAG["raw"] = len(raw)
-    if raw:
-        v = raw[0].get("_embedded", {}).get("venues", [{}])
-        DIAG["sample_venue"] = (v[0].get("name", "") if v else "")
+    sg_prices = fetch_seatgeek_prices()
 
     games = []
     for ev in raw:
         if "charlotte hornets" not in (ev.get("name") or "").lower():
-            continue  # keyword can catch unrelated events; keep only Hornets games
+            continue
         if not is_home_game(ev):
             continue
-        prices = ev.get("priceRanges", [])
-        low = min((p["min"] for p in prices if p.get("min") is not None), default=None)
-        high = max((p["max"] for p in prices if p.get("max") is not None), default=None)
-        if low is None and key:                    # list view omits price;
-            low, high = event_price(ev["id"], key)  # the event's own page has it
+        date = ev.get("dates", {}).get("start", {}).get("localDate")
+        low, high = sg_prices.get(date, (None, None))
         games.append({
             "event_id": ev["id"],
             "name": ev.get("name"),
-            "game_date": ev.get("dates", {}).get("start", {}).get("localDate"),
+            "game_date": date,
             "venue": (ev.get("_embedded", {}).get("venues", [{}])[0].get("name")),
             "url": ev.get("url"),
             "status": ev.get("dates", {}).get("status", {}).get("code"),
@@ -119,6 +138,7 @@ def fetch_home_games():
             "highest": high,
         })
     DIAG["kept"] = len(games)
+    DIAG["sg_matched"] = sum(1 for g in games if g["lowest"] is not None)
     return games
 
 
@@ -224,13 +244,9 @@ def build_dashboard(db):
             f"<td data-v='{cur if cur is not None else 1e9}'>{cur_s}</td>"
             f"<td>{ever_s}</td><td>{sparkline(hist)}</td></tr>")
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    empty_note = ""
-    if not trs:
-        empty_note = (f"<p style='color:#b00'>No games recorded yet. "
-                      f"Ticketmaster returned <b>{DIAG['raw']}</b> events; "
-                      f"<b>{DIAG['kept']}</b> matched as home games. "
-                      f"First event's venue: "
-                      f"\"{html.escape(DIAG['sample_venue'] or '(none)')}\".</p>")
+    sub = (f"Lowest SeatGeek price per game. Green = at its lowest ever. "
+           f"Prices matched for {DIAG['sg_matched']} of {DIAG['kept']} games. "
+           f"Updated {updated}.")
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hornets Ticket Tracker</title><style>
@@ -241,13 +257,12 @@ th,td{{padding:.5rem .6rem;border-bottom:1px solid #eee;text-align:left;font-siz
 th{{cursor:pointer;background:#fafafa}} tr.deal td{{background:#eafbea}}
 a{{color:#1d8cf8;text-decoration:none}}</style></head><body>
 <h1>Charlotte Hornets - home game prices</h1>
-<div class="sub">Lowest Ticketmaster price per game. Green = at its lowest ever. Updated {updated}.</div>
-{empty_note}
+<div class="sub">{sub}</div>
 <table id="t"><thead><tr>
 <th onclick="s(0)">Game</th><th onclick="s(1)">Date</th>
 <th onclick="s(2,1)">Lowest now</th><th onclick="s(3)">Lowest ever</th>
 <th>Trend</th></tr></thead><tbody>
-{''.join(trs) or '<tr><td colspan=5>-</td></tr>'}
+{''.join(trs) or '<tr><td colspan=5>No games recorded yet.</td></tr>'}
 </tbody></table>
 <script>
 function s(c,num){{const tb=document.querySelector('#t tbody');
@@ -271,7 +286,8 @@ def main():
     db.commit()
     build_dashboard(db)
     db.close()
-    print(f"TM returned {DIAG['raw']} events, kept {DIAG['kept']} home games.")
+    print(f"TM kept {DIAG['kept']} home games; "
+          f"SeatGeek priced {DIAG['sg_matched']}.")
     if all_alerts:
         notify(f"Hornets: {len(all_alerts)} update(s)", "\n\n".join(all_alerts))
     else:
