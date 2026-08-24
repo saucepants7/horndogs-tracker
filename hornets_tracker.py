@@ -56,7 +56,8 @@ def fetch_home_games():
         key = os.environ.get("TM_API_KEY")
         if not key:
             raise RuntimeError("TM_API_KEY not set")
-        q = {"apikey": key, "attractionId": ATTRACTION_ID,
+        q = {"apikey": key, "keyword": "Charlotte Hornets",
+             "classificationName": "Sports", "countryCode": "US",
              "size": "100", "sort": "date,asc"}
         url = TM_API + "?" + urllib.parse.urlencode(q)
         with urllib.request.urlopen(url, timeout=30) as r:
@@ -69,6 +70,8 @@ def fetch_home_games():
 
     games = []
     for ev in raw:
+        if "charlotte hornets" not in (ev.get("name") or "").lower():
+            continue  # keyword can catch unrelated events; keep only Hornets games
         if not is_home_game(ev):
             continue
         prices = ev.get("priceRanges", [])
