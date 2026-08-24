@@ -28,7 +28,7 @@ TM_API = "https://app.ticketmaster.com/discovery/v2/events.json"
 SG_API = "https://api.seatgeek.com/2/events"
 
 DIAG = {"raw": 0, "kept": 0, "sg_matched": 0, "sg_fetched": 0, "sg_note": "",
-        "sg_home": 0, "sg_priced": 0, "sg_sample": ""}
+        "sg_home": 0, "sg_priced": 0, "sg_sample": "", "sg_stats": ""}
 
 
 # ---- SeatGeek prices (matched to games by date) -----------------------------
@@ -49,6 +49,8 @@ def fetch_seatgeek_prices():
                 continue
             counters["home"] += 1
             stats = ev.get("stats") or {}
+            if not DIAG["sg_stats"]:
+                DIAG["sg_stats"] = json.dumps(stats)[:180]
             lp = stats.get("lowest_price")
             if date:
                 prices[date] = (lp, stats.get("highest_price"))
@@ -277,7 +279,9 @@ def build_dashboard(db):
         sub += (f" [SeatGeek debug: fetched {DIAG['sg_fetched']}, "
                 f"home {DIAG['sg_home']}, priced {DIAG['sg_priced']}, "
                 f"sample {DIAG['sg_sample'] or 'none'}"
-                + (f", {DIAG['sg_note']}" if DIAG['sg_note'] else "") + ".]")
+                + (f", {DIAG['sg_note']}" if DIAG['sg_note'] else "")
+                + (f", stats={DIAG['sg_stats']}" if DIAG['sg_stats'] else "")
+                + ".]")
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hornets Ticket Tracker</title><style>
