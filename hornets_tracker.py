@@ -31,6 +31,24 @@ TM_API        = "https://app.ticketmaster.com/discovery/v2/events.json"
 DIAG = {"raw": 0, "kept": 0, "sample_venue": ""}
 
 
+def event_price(event_id, key):
+    """Ticketmaster's search results usually omit priceRanges; the single-event
+    endpoint includes them. Returns (lowest, highest) or (None, None)."""
+    url = ("https://app.ticketmaster.com/discovery/v2/events/"
+           + urllib.parse.quote(event_id) + ".json?"
+           + urllib.parse.urlencode({"apikey": key}))
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            ev = json.load(r)
+    except Exception as e:
+        print(f"price lookup failed for {event_id}: {e}")
+        return None, None
+    prices = ev.get("priceRanges", [])
+    low = min((p["min"] for p in prices if p.get("min") is not None), default=None)
+    high = max((p["max"] for p in prices if p.get("max") is not None), default=None)
+    return low, high
+
+
 # ---- fetch ------------------------------------------------------------------
 def is_home_game(ev):
     """True if this event is a Hornets HOME game (played in Charlotte)."""
@@ -49,6 +67,7 @@ def fetch_home_games():
     Set MOCK_EVENTS=/path/to.json to test offline without an API key.
     """
     mock = os.environ.get("MOCK_EVENTS")
+    key = None
     if mock:
         with open(mock) as f:
             raw = json.load(f)
@@ -56,12 +75,21 @@ def fetch_home_games():
         key = os.environ.get("TM_API_KEY")
         if not key:
             raise RuntimeError("TM_API_KEY not set")
-        q = {"apikey": key, "keyword": "Charlotte Hornets",
-             "classificationName": "Sports", "countryCode": "US",
-             "size": "100", "sort": "date,asc"}
-        url = TM_API + "?" + urllib.parse.urlencode(q)
-        with urllib.request.urlopen(url, timeout=30) as r:
-            raw = json.load(r).get("_embedded", {}).get("events", [])
+        raw = []
+        page = 0
+        while page < 10:                       # safety cap; season fits easily
+            q = {"apikey": key, "keyword": "Charlotte Hornets",
+                 "classificationName": "Sports", "countryCode": "US",
+                 "size": "100", "sort": "date,asc", "page": str(page)}
+            url = TM_API + "?" + urllib.parse.urlencode(q)
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = json.load(r)
+            batch = data.get("_embedded", {}).get("events", [])
+            raw += batch
+            total_pages = data.get("page", {}).get("totalPages", 1)
+            page += 1
+            if not batch or page >= total_pages:
+                break
 
     DIAG["raw"] = len(raw)
     if raw:
@@ -77,6 +105,8 @@ def fetch_home_games():
         prices = ev.get("priceRanges", [])
         low = min((p["min"] for p in prices if p.get("min") is not None), default=None)
         high = max((p["max"] for p in prices if p.get("max") is not None), default=None)
+        if low is None and key:                    # list view omits price;
+            low, high = event_price(ev["id"], key)  # the event's own page has it
         games.append({
             "event_id": ev["id"],
             "name": ev.get("name"),
