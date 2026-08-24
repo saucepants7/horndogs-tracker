@@ -27,7 +27,8 @@ HTML_PATH = os.path.join(os.path.dirname(__file__), "index.html")
 TM_API = "https://app.ticketmaster.com/discovery/v2/events.json"
 SG_API = "https://api.seatgeek.com/2/events"
 
-DIAG = {"raw": 0, "kept": 0, "sg_matched": 0, "sg_fetched": 0, "sg_note": ""}
+DIAG = {"raw": 0, "kept": 0, "sg_matched": 0, "sg_fetched": 0, "sg_note": "",
+        "sg_home": 0, "sg_priced": 0, "sg_sample": ""}
 
 
 # ---- SeatGeek prices (matched to games by date) -----------------------------
@@ -35,21 +36,30 @@ def fetch_seatgeek_prices():
     """Return {YYYY-MM-DD: (lowest, highest)} for Hornets HOME games."""
     mock = os.environ.get("MOCK_SG")
     prices = {}
+    counters = {"home": 0, "priced": 0}
 
     def absorb(events):
         for ev in events:
-            city = ((ev.get("venue") or {}).get("city") or "")
+            v = ev.get("venue") or {}
+            city = v.get("city") or ""
+            date = (ev.get("datetime_local") or "")[:10]
+            if not DIAG["sg_sample"] and (city or date):
+                DIAG["sg_sample"] = f"city='{city}' date={date}"
             if HOME_CITY not in city.lower():      # home games only
                 continue
-            date = (ev.get("datetime_local") or "")[:10]
+            counters["home"] += 1
             stats = ev.get("stats") or {}
+            lp = stats.get("lowest_price")
             if date:
-                prices[date] = (stats.get("lowest_price"),
-                                stats.get("highest_price"))
+                prices[date] = (lp, stats.get("highest_price"))
+                if lp is not None:
+                    counters["priced"] += 1
 
     if mock:
         absorb(json.load(open(mock)))
-        DIAG["sg_fetched"] = len(prices)
+        DIAG["sg_fetched"] = counters["home"]
+        DIAG["sg_home"] = counters["home"]
+        DIAG["sg_priced"] = counters["priced"]
         return prices
 
     cid = os.environ.get("SEATGEEK_CLIENT_ID")
@@ -86,6 +96,8 @@ def fetch_seatgeek_prices():
     if fetched[0] == 0 and not DIAG["sg_note"]:
         query({"q": "Charlotte Hornets"})       # fallback if the slug is wrong
     DIAG["sg_fetched"] = fetched[0]
+    DIAG["sg_home"] = counters["home"]
+    DIAG["sg_priced"] = counters["priced"]
     return prices
 
 
@@ -262,7 +274,9 @@ def build_dashboard(db):
            f"Prices matched for {DIAG['sg_matched']} of {DIAG['kept']} games. "
            f"Updated {updated}.")
     if DIAG["sg_matched"] == 0:
-        sub += (f" [SeatGeek debug: fetched {DIAG['sg_fetched']} events"
+        sub += (f" [SeatGeek debug: fetched {DIAG['sg_fetched']}, "
+                f"home {DIAG['sg_home']}, priced {DIAG['sg_priced']}, "
+                f"sample {DIAG['sg_sample'] or 'none'}"
                 + (f", {DIAG['sg_note']}" if DIAG['sg_note'] else "") + ".]")
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
