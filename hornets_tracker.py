@@ -2,10 +2,11 @@
 """Charlotte Hornets home-game price tracker.
 
 Every run it:
-  1. pulls Hornets HOME games from the Ticketmaster API
-  2. records each game's lowest price into a small SQLite database (history)
+  1. pulls Hornets games from the Ticketmaster API
+  2. keeps HOME games (played in Charlotte) and records each game's lowest
+     price into a small SQLite database (this builds the price history)
   3. flags onsales and unusually good prices, and pushes a notification
-  4. rebuilds index.html — a sortable table you can view on GitHub Pages
+  4. rebuilds index.html - a sortable table you can view on GitHub Pages
 
 Standard library only. No pip installs.
 """
@@ -18,16 +19,30 @@ import urllib.request
 from datetime import datetime, timezone
 
 # ---- settings you can tweak -------------------------------------------------
-ATTRACTION_ID = "931493"          # Charlotte Hornets on Ticketmaster
-VENUE_MATCH   = "Spectrum Center"  # keep only home games at this venue
+ATTRACTION_ID = "931493"           # Charlotte Hornets on Ticketmaster
+HOME_CITY     = "charlotte"        # home games are played here
 DEAL_RATIO    = 0.80               # alert when lowest <= 80% of its own average
 MIN_HISTORY   = 3                  # need this many past points before deal alerts
 DB_PATH       = os.path.join(os.path.dirname(__file__), "prices.db")
 HTML_PATH     = os.path.join(os.path.dirname(__file__), "index.html")
 TM_API        = "https://app.ticketmaster.com/discovery/v2/events.json"
 
+# filled in during a run so the dashboard can show what the API returned
+DIAG = {"raw": 0, "kept": 0, "sample_venue": ""}
+
 
 # ---- fetch ------------------------------------------------------------------
+def is_home_game(ev):
+    """True if this event is a Hornets HOME game (played in Charlotte)."""
+    venues = ev.get("_embedded", {}).get("venues", [])
+    if not venues:
+        return False
+    v = venues[0]
+    city = (v.get("city", {}) or {}).get("name", "") or ""
+    name = v.get("name", "") or ""
+    return HOME_CITY in city.lower() or "spectrum" in name.lower()
+
+
 def fetch_home_games():
     """Return a list of normalized home-game dicts from Ticketmaster.
 
@@ -47,12 +62,15 @@ def fetch_home_games():
         with urllib.request.urlopen(url, timeout=30) as r:
             raw = json.load(r).get("_embedded", {}).get("events", [])
 
+    DIAG["raw"] = len(raw)
+    if raw:
+        v = raw[0].get("_embedded", {}).get("venues", [{}])
+        DIAG["sample_venue"] = (v[0].get("name", "") if v else "")
+
     games = []
     for ev in raw:
-        venues = ev.get("_embedded", {}).get("venues", [])
-        venue = venues[0].get("name", "") if venues else ""
-        if VENUE_MATCH.lower() not in venue.lower():
-            continue  # away game — skip
+        if not is_home_game(ev):
+            continue
         prices = ev.get("priceRanges", [])
         low = min((p["min"] for p in prices if p.get("min") is not None), default=None)
         high = max((p["max"] for p in prices if p.get("max") is not None), default=None)
@@ -60,13 +78,14 @@ def fetch_home_games():
             "event_id": ev["id"],
             "name": ev.get("name"),
             "game_date": ev.get("dates", {}).get("start", {}).get("localDate"),
-            "venue": venue,
+            "venue": (ev.get("_embedded", {}).get("venues", [{}])[0].get("name")),
             "url": ev.get("url"),
             "status": ev.get("dates", {}).get("status", {}).get("code"),
             "onsale": ev.get("sales", {}).get("public", {}).get("startDateTime"),
             "lowest": low,
             "highest": high,
         })
+    DIAG["kept"] = len(games)
     return games
 
 
@@ -172,6 +191,13 @@ def build_dashboard(db):
             f"<td data-v='{cur if cur is not None else 1e9}'>{cur_s}</td>"
             f"<td>{ever_s}</td><td>{sparkline(hist)}</td></tr>")
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    empty_note = ""
+    if not trs:
+        empty_note = (f"<p style='color:#b00'>No games recorded yet. "
+                      f"Ticketmaster returned <b>{DIAG['raw']}</b> events; "
+                      f"<b>{DIAG['kept']}</b> matched as home games. "
+                      f"First event's venue: "
+                      f"\"{html.escape(DIAG['sample_venue'] or '(none)')}\".</p>")
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hornets Ticket Tracker</title><style>
@@ -183,11 +209,12 @@ th{{cursor:pointer;background:#fafafa}} tr.deal td{{background:#eafbea}}
 a{{color:#1d8cf8;text-decoration:none}}</style></head><body>
 <h1>Charlotte Hornets - home game prices</h1>
 <div class="sub">Lowest Ticketmaster price per game. Green = at its lowest ever. Updated {updated}.</div>
+{empty_note}
 <table id="t"><thead><tr>
 <th onclick="s(0)">Game</th><th onclick="s(1)">Date</th>
 <th onclick="s(2,1)">Lowest now</th><th onclick="s(3)">Lowest ever</th>
 <th>Trend</th></tr></thead><tbody>
-{''.join(trs) or '<tr><td colspan=5>No games recorded yet.</td></tr>'}
+{''.join(trs) or '<tr><td colspan=5>-</td></tr>'}
 </tbody></table>
 <script>
 function s(c,num){{const tb=document.querySelector('#t tbody');
@@ -211,10 +238,11 @@ def main():
     db.commit()
     build_dashboard(db)
     db.close()
+    print(f"TM returned {DIAG['raw']} events, kept {DIAG['kept']} home games.")
     if all_alerts:
         notify(f"Hornets: {len(all_alerts)} update(s)", "\n\n".join(all_alerts))
     else:
-        print("No changes.")
+        print("No new alerts.")
 
 
 if __name__ == "__main__":
