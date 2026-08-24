@@ -1,0 +1,23 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hornets Ticket Tracker</title><style>
+body{font-family:system-ui,sans-serif;margin:1rem;color:#111}
+h1{font-size:1.2rem} .sub{color:#666;font-size:.8rem;margin-bottom:1rem}
+table{border-collapse:collapse;width:100%}
+th,td{padding:.5rem .6rem;border-bottom:1px solid #eee;text-align:left;font-size:.9rem}
+th{cursor:pointer;background:#fafafa} tr.deal td{background:#eafbea}
+a{color:#1d8cf8;text-decoration:none}</style></head><body>
+<h1>Charlotte Hornets - home game prices</h1>
+<div class="sub">Lowest Ticketmaster price per game. Green = at its lowest ever. Updated 2026-08-24 01:00 UTC.</div>
+<table id="t"><thead><tr>
+<th onclick="s(0)">Game</th><th onclick="s(1)">Date</th>
+<th onclick="s(2,1)">Lowest now</th><th onclick="s(3)">Lowest ever</th>
+<th>Trend</th></tr></thead><tbody>
+<tr><td colspan=5>No games recorded yet.</td></tr>
+</tbody></table>
+<script>
+function s(c,num){const tb=document.querySelector('#t tbody');
+[...tb.rows].sort((a,b)=>{let x=a.cells[c],y=b.cells[c];
+x=num?+x.dataset.v:x.innerText;y=num?+y.dataset.v:y.innerText;
+return x>y?1:x<y?-1:0}).forEach(r=>tb.appendChild(r))}
+</script></body></html>
