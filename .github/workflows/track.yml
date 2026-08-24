@@ -20,6 +20,7 @@ jobs:
       - name: Track prices
         env:
           TM_API_KEY: ${{ secrets.TM_API_KEY }}
+          SEATGEEK_CLIENT_ID: ${{ secrets.SEATGEEK_CLIENT_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python hornets_tracker.py
 
