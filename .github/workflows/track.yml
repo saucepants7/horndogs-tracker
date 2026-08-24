@@ -1,0 +1,32 @@
+name: hornets-tracker
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"      # every 6 hours (UTC)
+  workflow_dispatch:            # a manual "Run" button in the Actions tab
+
+permissions:
+  contents: write               # lets it save prices.db + index.html back
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Track prices
+        env:
+          TM_API_KEY: ${{ secrets.TM_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python hornets_tracker.py
+
+      - name: Save data + dashboard
+        run: |
+          git config user.name  "hornets-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add prices.db index.html
+          git commit -m "update prices" || echo "nothing changed"
+          git push
